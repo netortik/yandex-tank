@@ -20,8 +20,7 @@ analytic tools for the results they produce.
         'psutil>=1.2.1', 'requests>=2.5.1', 'paramiko>=1.16.0',
         'pandas>=0.23.3', 'numpy>=1.13.3', 'future>=0.16.0',
         'pip>=8.1.2',
-        'pyyaml>=3.12', 'cerberus==1.2', 'influxdb>=5.0.0', 'netort==0.2.8',
-        'scipy>=1.1.0', 'scikit-learn>=0.19.2', 
+        'pyyaml>=3.12', 'cerberus==1.2', 'influxdb>=5.0.0', 'netort==0.2.8'
     ],
     setup_requires=[
     ],
