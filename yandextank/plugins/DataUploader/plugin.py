@@ -112,6 +112,7 @@ class Plugin(AbstractPlugin, AggregateResultListener,
 
     def set_option(self, option, value):
         self.cfg.setdefault('meta', {})[option] = value
+        self.core.publish(self.SECTION, 'meta.{}'.format(option), value)
 
     @staticmethod
     def get_key():
@@ -239,7 +240,6 @@ class Plugin(AbstractPlugin, AggregateResultListener,
             self.add_cleanup(self.unlock_targets)
             self.locked_targets = self.check_and_lock_targets(strict=self.get_option('strict_lock'),
                                                               ignore=self.get_option('ignore_target_lock'))
-            self.add_cleanup(self.close_job)
             if lp_job._number:
                 self.make_symlink(lp_job._number)
                 self.check_task_is_open()
@@ -361,15 +361,8 @@ class Plugin(AbstractPlugin, AggregateResultListener,
             logger.debug("No autostop plugin loaded", exc_info=True)
 
         if autostop and autostop.cause_criterion:
-            rps = 0
-            if autostop.cause_criterion.cause_second:
-                rps = autostop.cause_criterion.cause_second[
-                    1]["metrics"]["reqps"]
-                if not rps:
-                    rps = autostop.cause_criterion.cause_second[0][
-                        "overall"]["interval_real"]["len"]
             self.lp_job.set_imbalance_and_dsc(
-                int(rps), autostop.cause_criterion.explain())
+                autostop.imbalance_rps, autostop.cause_criterion.explain())
 
         else:
             logger.debug("No autostop cause detected")
@@ -406,7 +399,7 @@ class Plugin(AbstractPlugin, AggregateResultListener,
                 break
             if self.finished:
                 break
-        logger.info("Closing Status sender thread")
+        logger.info("Closed Status sender thread")
 
     def __uploader(self, queue, sender_method, name='Uploader'):
         logger.info('{} thread started'.format(name))
@@ -552,6 +545,13 @@ class Plugin(AbstractPlugin, AggregateResultListener,
             self._lp_job = self.__get_lp_job()
             self.core.publish(self.SECTION, 'job_no', self._lp_job.number)
             self.core.publish(self.SECTION, 'web_link', self._lp_job.web_link)
+            self.core.publish(self.SECTION, 'job_name', self._lp_job.name)
+            self.core.publish(self.SECTION, 'job_dsc', self._lp_job.description)
+            self.core.publish(self.SECTION, 'person', self._lp_job.person)
+            self.core.publish(self.SECTION, 'task', self._lp_job.task)
+            self.core.publish(self.SECTION, 'version', self._lp_job.version)
+            self.core.publish(self.SECTION, 'meta', self.cfg.get('meta', {}))
+
         return self._lp_job
 
     def __get_lp_job(self):
@@ -572,7 +572,7 @@ class Plugin(AbstractPlugin, AggregateResultListener,
                        token=self.get_option('upload_token'),
                        person=self.__get_operator(),
                        task=self.task,
-                       name=self.get_option('job_name', 'none'),
+                       name=self.get_option('job_name', 'untitled'),
                        description=self.get_option('job_dsc'),
                        tank=self.core.job.tank,
                        notify_list=self.get_option("notify"),
@@ -581,7 +581,8 @@ class Plugin(AbstractPlugin, AggregateResultListener,
                        log_data_requests=self.get_option('log_data_requests'),
                        log_monitoring_requests=self.get_option('log_monitoring_requests'),
                        log_status_requests=self.get_option('log_status_requests'),
-                       log_other_requests=self.get_option('log_other_requests'))
+                       log_other_requests=self.get_option('log_other_requests'),
+                       add_cleanup=lambda: self.add_cleanup(self.close_job))
         lp_job.send_config(LPRequisites.CONFIGINITIAL, yaml.dump(self.core.configinitial))
         return lp_job
 
@@ -683,7 +684,8 @@ class LPJob(object):
             notify_list=None,
             version=None,
             detailed_time=None,
-            load_scheme=None):
+            load_scheme=None,
+            add_cleanup=lambda: None):
         """
         :param client: APIClient
         :param log_data_requests: bool
@@ -714,6 +716,7 @@ class LPJob(object):
         self.load_scheme = load_scheme
         self.is_finished = False
         self.web_link = ''
+        self.add_cleanup = add_cleanup
 
     def push_test_data(self, data, stats):
         if not self.interrupted.is_set():
@@ -779,6 +782,7 @@ class LPJob(object):
                                                             detailed_time=self.detailed_time,
                                                             notify_list=self.notify_list,
                                                             trace=self.log_other_requests)
+        self.add_cleanup()
         logger.info('Job created: {}'.format(self._number))
         self.web_link = urljoin(self.api_client.base_url, str(self._number))
 

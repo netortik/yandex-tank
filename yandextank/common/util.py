@@ -3,6 +3,7 @@ import os
 import pwd
 import socket
 import traceback
+
 import http.client
 import logging
 import errno
@@ -13,6 +14,7 @@ import psutil
 import argparse
 
 from paramiko import SSHClient, AutoAddPolicy
+from retrying import retry
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +70,7 @@ http://uucode.com/blog/2015/02/20/workaround-for-ctr-mode-needs-counter-paramete
     def execute(self, cmd):
         logger.info("Execute on %s: %s", self.host, cmd)
         with self.connect() as client:
-            _, stdout, stderr = client.exec_command(cmd)
+            _, stdout, stderr = client.exec_command(cmd, get_pty=True)
             output = stdout.read()
             errors = stderr.read()
             err_code = stdout.channel.recv_exit_status()
@@ -162,9 +164,18 @@ class AsyncSession(object):
     def finished(self):
         return self.session.exit_status_ready()
 
+    def exit_status(self):
+        return self.session.recv_exit_status()
+
     def read_maybe(self):
         if self.session.recv_ready():
             return self.session.recv(4096)
+        else:
+            return None
+
+    def read_err_maybe(self):
+        if self.session.recv_stderr_ready():
+            return self.session.recv_stderr(4096)
         else:
             return None
 
@@ -629,3 +640,81 @@ def tail_lines(filepath, lines_num, bufsize=8192):
                     return data[-lines_num:]
         except (IOError, OSError):
             return data
+
+
+class FileLockedError(RuntimeError):
+    pass
+
+    @classmethod
+    def retry(cls, exception):
+        return isinstance(exception, cls)
+
+
+class FileMultiReader(object):
+    def __init__(self, filename, provider_stop_event, cache_size=1024 * 1024 * 50):
+        self.buffer = ""
+        self.filename = filename
+        self.cache_size = cache_size
+        self._cursor_map = {}
+        self._is_locked = False
+        self._opened_file = open(self.filename)
+        self.stop = provider_stop_event
+
+    def close(self, force=False):
+        self.wait_lock()
+        self._opened_file.close()
+        self.unlock()
+
+    def get_file(self, cache_size=None):
+        cache_size = self.cache_size if not cache_size else cache_size
+        fileobj = FileLike(self, cache_size)
+        return fileobj
+
+    def read_with_lock(self, pos, _len=None):
+        """
+        Reads {_len} characters if _len is not None else reads line
+        :param pos: start reading position
+        :param _len: number of characters to read
+        :rtype: (string, int)
+        """
+        self.wait_lock()
+        try:
+            self._opened_file.seek(pos)
+            result = self._opened_file.read(_len) if _len is not None else self._opened_file.readline()
+            stop_pos = self._opened_file.tell()
+        finally:
+            self.unlock()
+        if not result and self.stop.is_set():
+            result = None
+        return result, stop_pos
+
+    @retry(wait_random_min=5, wait_random_max=20, stop_max_delay=10000,
+           retry_on_exception=FileLockedError.retry, wrap_exception=True)
+    def wait_lock(self):
+        if self._is_locked:
+            raise FileLockedError('Generator output file {} is locked'.format(self.filename))
+        else:
+            self._is_locked = True
+            return True
+
+    def unlock(self):
+        self._is_locked = False
+
+
+class FileLike(object):
+    def __init__(self, multireader, cache_size):
+        """
+        :type multireader: FileMultiReader
+        """
+        self.multireader = multireader
+        self.cache_size = cache_size
+        self._cursor = 0
+
+    def read(self, _len=None):
+        _len = self.cache_size if not _len else _len
+        result, self._cursor = self.multireader.read_with_lock(self._cursor, _len)
+        return result
+
+    def readline(self):
+        result, self._cursor = self.multireader.read_with_lock(self._cursor)
+        return result

@@ -4,14 +4,15 @@
 import logging
 import subprocess
 import time
+from threading import Event
 
-from .reader import PhantomReader, PhantomStatsReader
+from .reader import PhantomReader, PhantomStatsReader, string_to_df
 from .utils import PhantomConfig
 from .widget import PhantomInfoWidget, PhantomProgressBarWidget
 from ..Autostop import Plugin as AutostopPlugin
 from ..Console import Plugin as ConsolePlugin
 from ...common.interfaces import AbstractCriterion, GeneratorPlugin
-from ...common.util import expand_to_seconds
+from ...common.util import expand_to_seconds, FileMultiReader
 
 from netort.process import execute
 
@@ -25,6 +26,7 @@ class Plugin(GeneratorPlugin):
 
     def __init__(self, core, cfg, name):
         super(Plugin, self).__init__(core, cfg, name)
+        self.phout_finished = Event()
         self.predefined_phout = None
         self.did_phout_import_try = False
         self.eta_file = None
@@ -36,6 +38,7 @@ class Plugin(GeneratorPlugin):
         self.config = None
         self.enum_ammo = None
         self.phout_import_mode = None
+        self.start_time = None
 
     @staticmethod
     def get_key():
@@ -85,14 +88,14 @@ class Plugin(GeneratorPlugin):
             self._stat_log = self.core.mkstemp(".log", "phantom_stat_")
         return self._stat_log
 
-    def get_reader(self):
+    def get_reader(self, parser=string_to_df):
         if self.reader is None:
-            self.reader = PhantomReader(self.phantom.phout_file)
-        return self.reader
+            self.reader = FileMultiReader(self.phantom.phout_file, self.phout_finished)
+        return PhantomReader(self.reader.get_file(), parser=parser)
 
     def get_stats_reader(self):
         if self.stats_reader is None:
-            self.stats_reader = PhantomStatsReader(self.stat_log, self.phantom.get_info())
+            self.stats_reader = PhantomStatsReader(self.stat_log, self.phantom.get_info(), lambda: self.start_time)
         return self.stats_reader
 
     def prepare_test(self):
@@ -119,6 +122,7 @@ class Plugin(GeneratorPlugin):
 
         self.core.job.aggregator.add_result_listener(self)
 
+        # stepping inside get_info()
         self.core.job.phantom_info = self.phantom.get_info()
 
         try:
@@ -140,11 +144,11 @@ class Plugin(GeneratorPlugin):
             logger.info('Enabled cpu affinity %s for phantom', self.affinity)
             args = self.core.__setup_affinity(self.affinity, args=args)
         logger.debug("Starting %s with arguments: %s", self.get_option("phantom_path"), args)
-        self.start_time = time.time()
         phantom_stderr_file = self.core.mkstemp(
             ".log", "phantom_stdout_stderr_")
         self.core.add_artifact_file(phantom_stderr_file)
         self.process_stderr = open(phantom_stderr_file, 'w')
+        self.start_time = time.time()
         self.process = subprocess.Popen(
             args,
             stderr=self.process_stderr,
@@ -155,6 +159,7 @@ class Plugin(GeneratorPlugin):
         retcode = self.process.poll()
         if retcode is not None:
             logger.info("Phantom done its work with exit code: %s", retcode)
+            self.phout_finished.set()
             return abs(retcode)
         else:
             info = self.get_info()
@@ -171,6 +176,7 @@ class Plugin(GeneratorPlugin):
                 self.process.communicate()
         else:
             logger.debug("Seems phantom finished OK")
+        self.phout_finished.set()
         if self.process_stderr:
             self.process_stderr.close()
         return retcode
